@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/main.tsx","./src/types.ts","./src/components/architecturecanvas.tsx","./src/components/configpanel.tsx","./src/components/tracerouter.tsx","./src/components/walkthroughconsole.tsx","./src/components/primitives.tsx","./src/data/clusterdata.ts","./src/data/stepengine.ts","./src/state/simulatorcontext.tsx"],"version":"5.9.3"}
