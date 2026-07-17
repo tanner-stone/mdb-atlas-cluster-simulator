@@ -397,11 +397,11 @@ const SCENARIO_SINGLE_SHARD_221: Scenario = {
  * ======================================================================== */
 
 export const SCENARIOS: Scenario[] = [
-  SCENARIO_GLOBAL_2SHARD,
   SCENARIO_SINGLE_SHARD_221,
+  SCENARIO_GLOBAL_2SHARD,
 ];
 
-export const DEFAULT_SCENARIO_ID = SCENARIO_GLOBAL_2SHARD.id;
+export const DEFAULT_SCENARIO_ID = SCENARIO_SINGLE_SHARD_221.id;
 
 export function getScenario(id: string): Scenario {
   return SCENARIOS.find((s) => s.id === id) ?? SCENARIOS[0];
