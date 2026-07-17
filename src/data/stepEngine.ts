@@ -37,10 +37,9 @@ import type {
   SimulationStep,
 } from '../types';
 import {
-  REGION_TO_MONGOS,
   shardForCollection,
   type RegionBox,
-  ALL_BOXES,
+  type ScenarioLookups,
 } from './clusterData';
 
 /* -------------------------------------------------------------------------- */
@@ -59,8 +58,11 @@ function networkDistance(
 }
 
 /** The box whose mongos id matches — used to discover the mongos's region/cloud. */
-function boxByMongos(mongosId: string): RegionBox | undefined {
-  return ALL_BOXES.find((b) => b.mongosId === mongosId);
+function boxByMongos(
+  mongosId: string,
+  lookups: ScenarioLookups
+): RegionBox | undefined {
+  return lookups.allBoxes.find((b) => b.mongosId === mongosId);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -151,6 +153,8 @@ export interface GenerateArgs {
   readPreference: ReadPreference;
   writeConcern: 'majority' | '1';
   topo: Topology;
+  /** Scenario-scoped lookups (region -> mongos, list of boxes, etc). */
+  lookups: ScenarioLookups;
 }
 
 
@@ -160,15 +164,23 @@ export interface GenerateArgs {
  * has no reachable members) — the caller surfaces that as an error banner.
  */
 export function generateSteps(args: GenerateArgs): SimulationStep[] {
-  const { queryType, collection, clientVNet, readPreference, writeConcern, topo } = args;
+  const { queryType, collection, clientVNet, readPreference, writeConcern, topo, lookups } = args;
 
   const shardId = shardForCollection(collection);
-  const shardLabel = shardId === 'shard-0' ? 'Shard 0 (Azure zone)' : 'Shard 1 (AWS zone)';
+  // In multi-shard scenarios shard-0 is the Azure zone / shard-1 is the AWS
+  // zone. In a single-shard scenario there is only one shard, so we describe
+  // it generically.
+  const isMultiShard = lookups.allBoxes.some((b) => b.shardId === 'shard-1');
+  const shardLabel = !isMultiShard
+    ? 'the sole shard'
+    : shardId === 'shard-0'
+      ? 'Shard 0 (Azure zone)'
+      : 'Shard 1 (AWS zone)';
   const linkName = clientVNet.cloud === 'Azure' ? 'Azure Private Link' : 'AWS PrivateLink';
 
   // 1) Client connects to its OWN local mongos (nearest routing endpoint).
-  const localMongosId = REGION_TO_MONGOS[clientVNet.region];
-  const mongosBox = boxByMongos(localMongosId);
+  const localMongosId = lookups.regionToMongos[clientVNet.region];
+  const mongosBox = boxByMongos(localMongosId, lookups);
   const mongosRegion = mongosBox?.region ?? clientVNet.region;
   const mongosCloud = (mongosBox?.cloud ?? clientVNet.cloud) as 'Azure' | 'AWS';
 

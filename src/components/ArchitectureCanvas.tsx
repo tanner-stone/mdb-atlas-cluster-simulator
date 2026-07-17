@@ -17,13 +17,7 @@ import { Boxes, Cloud, Network, ServerCog } from 'lucide-react';
 import { useSimulator } from '../state/SimulatorContext';
 import { CloudFlag, MongosBadge, NodeBadge } from './primitives';
 import TraceRouter from './TraceRouter';
-import {
-  AWS_VNETS,
-  AZURE_VNETS,
-  SHARD0_BOXES,
-  SHARD1_BOXES,
-  type RegionBox,
-} from '../data/clusterData';
+import type { RegionBox, ShardDef } from '../data/clusterData';
 import type { AppVNet, ClusterNode } from '../types';
 
 /**
@@ -159,6 +153,11 @@ function ShardCard({
   deadClouds: ('Azure' | 'AWS')[];
   accent: 'purple' | 'emerald';
 }) {
+  // Snap to a 3-column grid when we have <=3 boxes (typical), otherwise fall
+  // back to a wider auto grid so single-shard scenarios with more regions still
+  // lay out cleanly.
+  const gridCols =
+    boxes.length <= 3 ? 'grid-cols-3' : 'grid-cols-4';
 
   const ring =
     accent === 'purple'
@@ -182,7 +181,7 @@ function ShardCard({
           {zoneKey}
         </span>
       </div>
-      <div className="grid grid-cols-3 gap-2">
+      <div className={`grid ${gridCols} gap-2`}>
         {boxes.map((box) => (
           <RegionStack
             key={box.id}
@@ -204,7 +203,7 @@ function ShardCard({
 /* -------------------------------------------------------------------------- */
 export default function ArchitectureCanvas() {
   const canvasRef = useRef<HTMLDivElement>(null);
-  const { nodes, deadRegions, deadClouds, outage } = useSimulator();
+  const { nodes, deadRegions, deadClouds, outage, scenario } = useSimulator();
 
   // A VNet is considered dead if its region OR its whole cloud is offline.
   const vnetDead = (cloud: 'Azure' | 'AWS', region: string) =>
@@ -224,7 +223,7 @@ export default function ArchitectureCanvas() {
       {/* Outage banner */}
       {outage === 'AZURE_EAST' && (
         <div className="mb-3 flex items-center justify-center gap-2 rounded-lg border border-rose-500/50 bg-rose-600/15 py-1.5 text-[11px] font-bold uppercase tracking-widest text-rose-300">
-          <Network size={13} /> Azure eastus Region Offline — Shard 0 Primary failed over cross-cloud to AWS
+          <Network size={13} /> {scenario.azureEastBannerText}
         </div>
       )}
       {outage === 'NODE_DOWN' && killedNode && (
@@ -246,7 +245,7 @@ export default function ArchitectureCanvas() {
             sub="via Azure Private Link"
             accent="sky"
           />
-          {AZURE_VNETS.map((v) => (
+          {scenario.azureVNets.map((v) => (
             <VNetCard key={v.id} vnet={v} dead={vnetDead(v.cloud, v.region)} />
           ))}
         </div>
@@ -255,36 +254,32 @@ export default function ArchitectureCanvas() {
         {/* COLUMN 2 — Atlas Global Cluster Core */}
         <div className="col-span-8">
           <div className="relative rounded-2xl border-2 border-dashed border-emerald-600/40 bg-slate-900/40 p-3">
-            <div className="mb-3 flex items-center justify-center gap-2">
-              <Boxes size={15} className="text-emerald-400" />
-              <h2 className="text-center text-xs font-bold uppercase tracking-widest text-emerald-300">
-                MongoDB Atlas Project Footprint
-              </h2>
+            <div className="mb-3 flex flex-col items-center justify-center gap-0.5">
+              <div className="flex items-center gap-2">
+                <Boxes size={15} className="text-emerald-400" />
+                <h2 className="text-center text-xs font-bold uppercase tracking-widest text-emerald-300">
+                  MongoDB Atlas Project Footprint
+                </h2>
+              </div>
+              <div className="text-[10px] text-slate-400">
+                {scenario.label} · {scenario.description}
+              </div>
             </div>
 
             <div className="flex flex-col gap-3">
-              <ShardCard
-                title="Shard 0 · Azure-First Zone"
-                subtitle="Primary anchored in Azure eastus"
-                zoneKey='location="Azure"'
-                boxes={SHARD0_BOXES}
-                nodes={nodes}
-                deadRegions={deadRegions}
-                deadClouds={deadClouds}
-                accent="purple"
-              />
-
-              <ShardCard
-                title="Shard 1 · AWS-First Zone"
-                subtitle="Primary anchored in AWS us-east-1"
-                zoneKey='location="AWS"'
-                boxes={SHARD1_BOXES}
-                nodes={nodes}
-                deadRegions={deadRegions}
-                deadClouds={deadClouds}
-                accent="emerald"
-              />
-
+              {scenario.shards.map((s: ShardDef) => (
+                <ShardCard
+                  key={s.id}
+                  title={s.title}
+                  subtitle={s.subtitle}
+                  zoneKey={s.zoneKey}
+                  boxes={s.boxes}
+                  nodes={nodes}
+                  deadRegions={deadRegions}
+                  deadClouds={deadClouds}
+                  accent={s.accent}
+                />
+              ))}
             </div>
           </div>
         </div>
@@ -298,7 +293,7 @@ export default function ArchitectureCanvas() {
             sub="via AWS PrivateLink"
             accent="orange"
           />
-          {AWS_VNETS.map((v) => (
+          {scenario.awsVNets.map((v) => (
             <VNetCard key={v.id} vnet={v} dead={vnetDead(v.cloud, v.region)} />
           ))}
         </div>

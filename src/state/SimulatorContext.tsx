@@ -3,6 +3,7 @@
  *  SIMULATOR STATE ENGINE (React Context)
  * ============================================================================
  *  Single source of truth for the whole app:
+ *    - active scenario (topology preset)                 -> scenario switcher
  *    - cluster node topology (roles / health)            -> failover engine
  *    - read preference / write concern configuration
  *    - the selected collection                           -> step generation
@@ -33,7 +34,13 @@ import type {
   SimulationStep,
   WriteConcern,
 } from '../types';
-import { COLLECTION_LEDGER, DEFAULT_NODES, ALL_VNETS } from '../data/clusterData';
+import {
+  DEFAULT_SCENARIO_ID,
+  getScenario,
+  scenarioLookups,
+  SCENARIOS,
+  type Scenario,
+} from '../data/clusterData';
 import { generateSteps } from '../data/stepEngine';
 
 /* -------------------------------------------------------------------------- */
@@ -41,6 +48,7 @@ import { generateSteps } from '../data/stepEngine';
 /* -------------------------------------------------------------------------- */
 
 interface SimulatorState {
+  scenarioId: string;
   nodes: ClusterNode[];
   readPreference: ReadPreference;
   writeConcern: WriteConcern;
@@ -57,31 +65,34 @@ interface SimulatorState {
   log: string[];
 }
 
-const HEALTHY_LOG = [
-  'system> Atlas Global Cluster online. 2 shards / 10 data-bearing members across Azure + AWS.',
-  'system> Pick a collection, then arm a Write or Read simulation to begin.',
-];
+/** Build a pristine state slice for the given scenario. */
+function freshScenarioState(scenarioId: string): SimulatorState {
+  const scenario = getScenario(scenarioId);
+  return {
+    scenarioId: scenario.id,
+    nodes: scenario.nodes.map((n) => ({ ...n })),
+    readPreference: 'nearest',
+    writeConcern: 'majority',
+    collectionId: scenario.collections[0].id,
+    queryType: null,
+    currentStep: -1,
+    steps: [],
+    deadRegions: [],
+    deadClouds: [],
+    outage: 'NONE',
+    failoverActive: false,
+    log: [...scenario.healthyLog],
+  };
+}
 
-const initialState: SimulatorState = {
-  nodes: DEFAULT_NODES.map((n) => ({ ...n })),
-  readPreference: 'nearest',
-  writeConcern: 'majority',
-  collectionId: COLLECTION_LEDGER[0].id,
-  queryType: null,
-  currentStep: -1,
-  steps: [],
-  deadRegions: [],
-  deadClouds: [],
-  outage: 'NONE',
-  failoverActive: false,
-  log: [...HEALTHY_LOG],
-};
+const initialState: SimulatorState = freshScenarioState(DEFAULT_SCENARIO_ID);
 
 /* -------------------------------------------------------------------------- */
 /*  Actions                                                                   */
 /* -------------------------------------------------------------------------- */
 
 type Action =
+  | { type: 'SET_SCENARIO'; value: string }
   | { type: 'SET_READ_PREF'; value: ReadPreference }
   | { type: 'SET_WRITE_CONCERN'; value: WriteConcern }
   | { type: 'SET_COLLECTION'; value: string }
@@ -98,8 +109,11 @@ type Action =
 /*  Helpers                                                                   */
 /* -------------------------------------------------------------------------- */
 
-function getCollection(id: string): CollectionDef {
-  return COLLECTION_LEDGER.find((c) => c.id === id) ?? COLLECTION_LEDGER[0];
+function getCollectionFromScenario(
+  scenario: Scenario,
+  id: string
+): CollectionDef {
+  return scenario.collections.find((c) => c.id === id) ?? scenario.collections[0];
 }
 
 /** Removes a leading "[n/m] " tag from explanations for the log feed. */
@@ -119,7 +133,9 @@ function buildWalkthrough(
     return { queryType: null, steps: [], currentStep: -1 };
   }
 
-  const collection = getCollection(state.collectionId);
+  const scenario = getScenario(state.scenarioId);
+  const lookups = scenarioLookups(scenario);
+  const collection = getCollectionFromScenario(scenario, state.collectionId);
 
   // Pick the originating client. Prefer the collection's default client, but if
   // that VNet's region/cloud is offline, fall back to the nearest surviving
@@ -128,17 +144,17 @@ function buildWalkthrough(
   const isVNetAlive = (region: string, cloud: 'Azure' | 'AWS') =>
     !state.deadRegions.includes(region) && !state.deadClouds.includes(cloud);
 
-  const defaultClient = ALL_VNETS.find(
+  const defaultClient = lookups.allVNets.find(
     (v) => v.id === collection.defaultClientVNetId
   )!;
 
   let clientVNet = defaultClient;
   if (!isVNetAlive(defaultClient.region, defaultClient.cloud)) {
     clientVNet =
-      ALL_VNETS.find(
+      lookups.allVNets.find(
         (v) => v.cloud === defaultClient.cloud && isVNetAlive(v.region, v.cloud)
       ) ??
-      ALL_VNETS.find((v) => isVNetAlive(v.region, v.cloud)) ??
+      lookups.allVNets.find((v) => isVNetAlive(v.region, v.cloud)) ??
       defaultClient;
   }
 
@@ -159,6 +175,7 @@ function buildWalkthrough(
       deadRegions: state.deadRegions,
       deadClouds: state.deadClouds,
     },
+    lookups,
   });
 
 
@@ -194,6 +211,22 @@ function buildWalkthrough(
 
 function reducer(state: SimulatorState, action: Action): SimulatorState {
   switch (action.type) {
+    case 'SET_SCENARIO': {
+      if (action.value === state.scenarioId) return state;
+      const scenario = getScenario(action.value);
+      const fresh = freshScenarioState(scenario.id);
+      // Preserve operator's read/write preferences across scenario swaps.
+      return {
+        ...fresh,
+        readPreference: state.readPreference,
+        writeConcern: state.writeConcern,
+        log: [
+          ...fresh.log,
+          `system> Loaded scenario "${scenario.label}".`,
+        ],
+      };
+    }
+
     case 'SET_READ_PREF': {
       const next = { ...state, readPreference: action.value };
       // If a READ is currently armed, regenerate so the new pref takes effect.
@@ -248,13 +281,50 @@ function reducer(state: SimulatorState, action: Action): SimulatorState {
     case 'KILL_AZURE_EAST': {
       if (state.outage !== 'NONE') return state;
 
-      // Mark eastus DOWN; promote the surviving Shard-0 secondary in AWS us-west-1.
-      const promotedId = 'node-s0-us-west-1-s1';
-      const nodes = state.nodes.map((n) => {
-        if (n.region === 'eastus') return { ...n, status: 'DOWN' as const };
-        if (n.id === promotedId) return { ...n, role: 'PRIMARY' as const };
-        return n;
-      });
+      const scenario = getScenario(state.scenarioId);
+
+      // Take everyone in eastus down. Preferred promotion node lives on the
+      // scenario itself; if it is not present or not eligible, we fall back to
+      // a healthy secondary of the affected shard(s).
+      const preferPromoteId = scenario.azureEastPromotionNodeId;
+
+      // First, mark eastus DOWN.
+      let nodes = state.nodes.map((n) =>
+        n.region === 'eastus' ? { ...n, status: 'DOWN' as const } : n
+      );
+
+      // Any shards that lost their primary need a re-election. Prefer the
+      // scenario-suggested node when it belongs to the shard in question.
+      const orphanShards = Array.from(
+        new Set(
+          nodes
+            .filter((n) => n.region === 'eastus' && n.role === 'PRIMARY')
+            .map((n) => n.shardId)
+        )
+      );
+
+      const promotions: string[] = [];
+      for (const shardId of orphanShards) {
+        const survivors = nodes.filter(
+          (n) =>
+            n.shardId === shardId &&
+            n.status === 'HEALTHY' &&
+            n.role === 'SECONDARY'
+        );
+        let candidate =
+          survivors.find((n) => n.id === preferPromoteId) ??
+          // otherwise pick the same-cloud (Azure) survivor if any, else any survivor
+          survivors.find((n) => n.cloud === 'Azure') ??
+          survivors[0];
+        if (candidate) {
+          promotions.push(
+            `${shardId}: ${candidate.region} (${candidate.cloud})`
+          );
+          nodes = nodes.map((n) =>
+            n.id === candidate!.id ? { ...n, role: 'PRIMARY' as const } : n
+          );
+        }
+      }
 
       return {
         ...state,
@@ -262,7 +332,7 @@ function reducer(state: SimulatorState, action: Action): SimulatorState {
         deadRegions: ['eastus'],
         deadClouds: [],
         outage: 'AZURE_EAST',
-        failoverActive: true,
+        failoverActive: promotions.length > 0,
         queryType: null,
         steps: [],
         currentStep: -1,
@@ -270,9 +340,13 @@ function reducer(state: SimulatorState, action: Action): SimulatorState {
           ...state.log,
           '',
           '!! [CRITICAL CRASH SYSTEM EVENT DECLARED]',
-          '   -> Shard 0 Primary node in Azure eastus dropped offline unexpectedly.',
+          '   -> Azure eastus region dropped offline unexpectedly.',
           '   -> Initiating cross-cloud heartbeat check protocols.',
-          '   -> Raft election complete: Shard 0 Secondary (AWS us-west-1) PROMOTED to PRIMARY.',
+          ...(promotions.length
+            ? promotions.map(
+                (p) => `   -> Raft election complete: PROMOTED to PRIMARY at ${p}.`
+              )
+            : ['   -> No primaries were lost — replica set quorum preserved.']),
           'system> Cluster degraded but available. Re-arm a Write/Read to see rerouting.',
         ],
       };
@@ -346,15 +420,17 @@ function reducer(state: SimulatorState, action: Action): SimulatorState {
     }
 
 
-    case 'CLEAR_OUTAGE':
+    case 'CLEAR_OUTAGE': {
+      const fresh = freshScenarioState(state.scenarioId);
       return {
-        ...initialState,
+        ...fresh,
         // preserve operator config choices
         readPreference: state.readPreference,
         writeConcern: state.writeConcern,
         collectionId: state.collectionId,
         log: [...state.log, '', 'system> Outage cleared. Topology restored to healthy baseline.'],
       };
+    }
 
     default:
       return state;
@@ -368,6 +444,9 @@ function reducer(state: SimulatorState, action: Action): SimulatorState {
 interface SimulatorContextValue extends SimulatorState {
   activeStep: SimulationStep | null;
   collection: CollectionDef;
+  scenario: Scenario;
+  scenarios: Scenario[];
+  setScenario: (id: string) => void;
   setReadPreference: (v: ReadPreference) => void;
   setWriteConcern: (v: WriteConcern) => void;
   setCollection: (id: string) => void;
@@ -386,6 +465,10 @@ const SimulatorContext = createContext<SimulatorContextValue | null>(null);
 export function SimulatorProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
 
+  const setScenario = useCallback(
+    (id: string) => dispatch({ type: 'SET_SCENARIO', value: id }),
+    []
+  );
   const setReadPreference = useCallback(
     (v: ReadPreference) => dispatch({ type: 'SET_READ_PREF', value: v }),
     []
@@ -421,13 +504,17 @@ export function SimulatorProvider({ children }: { children: ReactNode }) {
       ? state.steps[state.currentStep]
       : null;
 
-  const collection = getCollection(state.collectionId);
+  const scenario = getScenario(state.scenarioId);
+  const collection = getCollectionFromScenario(scenario, state.collectionId);
 
   const value = useMemo<SimulatorContextValue>(
     () => ({
       ...state,
       activeStep,
       collection,
+      scenario,
+      scenarios: SCENARIOS,
+      setScenario,
       setReadPreference,
       setWriteConcern,
       setCollection,
@@ -443,6 +530,8 @@ export function SimulatorProvider({ children }: { children: ReactNode }) {
       state,
       activeStep,
       collection,
+      scenario,
+      setScenario,
       setReadPreference,
       setWriteConcern,
       setCollection,

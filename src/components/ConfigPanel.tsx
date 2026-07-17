@@ -15,6 +15,7 @@ import {
   BookText,
   Database,
   FlaskConical,
+  Layers,
   MousePointerClick,
   PenLine,
   RotateCcw,
@@ -26,7 +27,6 @@ import {
 import type { ReactNode } from 'react';
 import { useSimulator } from '../state/SimulatorContext';
 import { GlassPanel } from './primitives';
-import { COLLECTION_LEDGER } from '../data/clusterData';
 import type { ReadPreference, WriteConcern } from '../types';
 
 
@@ -55,6 +55,9 @@ export default function ConfigPanel() {
     collectionId,
     outage,
     failoverActive,
+    scenario,
+    scenarios,
+    setScenario,
     setReadPreference,
     setWriteConcern,
     setCollection,
@@ -65,6 +68,7 @@ export default function ConfigPanel() {
 
   const azureEastDead = outage === 'AZURE_EAST';
   const outageActive = outage !== 'NONE';
+  const collections = scenario.collections;
 
 
 
@@ -84,6 +88,25 @@ export default function ConfigPanel() {
           </p>
         </div>
       </div>
+
+      {/* Scenario picker */}
+      <GlassPanel className="p-4">
+        <SectionTitle icon={<Layers size={13} />}>Cluster Scenario</SectionTitle>
+        <select
+          value={scenario.id}
+          onChange={(e) => setScenario(e.target.value)}
+          className="mb-2 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-2 py-2 text-xs text-slate-200 outline-none focus:border-emerald-500"
+        >
+          {scenarios.map((s) => (
+            <option key={s.id} value={s.id}>
+              {s.label}
+            </option>
+          ))}
+        </select>
+        <p className="text-[10px] leading-snug text-slate-500">
+          {scenario.description}
+        </p>
+      </GlassPanel>
 
       {/* Read / Write settings */}
       <GlassPanel className="p-4">
@@ -213,7 +236,7 @@ export default function ConfigPanel() {
           onChange={(e) => setCollection(e.target.value)}
           className="mb-3 w-full rounded-lg border border-slate-700 bg-slate-950/80 px-2 py-2 text-xs text-slate-200 outline-none focus:border-emerald-500"
         >
-          {COLLECTION_LEDGER.map((c) => (
+          {collections.map((c) => (
             <option key={c.id} value={c.id}>
               {c.label} — {c.namespace}
             </option>
@@ -222,10 +245,12 @@ export default function ConfigPanel() {
 
         <SectionTitle icon={<BookText size={13} />}>Collection Ledger</SectionTitle>
         <div className="flex flex-col gap-2">
-          {COLLECTION_LEDGER.map((c) => {
+          {collections.map((c) => {
             const selected = c.id === collectionId;
-            const zone =
-              c.residesOn === 'both'
+            const isMultiShard = scenario.shards.length > 1;
+            const zone = !isMultiShard
+              ? 'Single shard'
+              : c.residesOn === 'both'
                 ? 'Both shards (geo)'
                 : c.residesOn === 'shard-0'
                   ? 'Shard 0 (Azure)'
